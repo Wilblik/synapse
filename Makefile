@@ -13,4 +13,4 @@ run: all
 clean:
 	rm -f $(TARGET)
 
-.PHONY: all clean
+.PHONY: all run clean
