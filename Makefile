@@ -1,13 +1,16 @@
 CC = gcc
 CFLAGS = -g -Wall -Wextra
-TARGETS = synapse
+TARGET = synapse
 
-all: $(TARGETS)
+all: $(TARGET)
 
 synapse: main.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+run: all
+	./$(TARGET)
+
 clean:
-	rm -f $(TARGETS)
+	rm -f $(TARGET)
 
 .PHONY: all clean
