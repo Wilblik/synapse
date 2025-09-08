@@ -1,5 +1,8 @@
+#include <asm-generic/socket.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
@@ -10,9 +13,18 @@
 #include <sys/types.h>
 #include <sys/epoll.h>
 
+#include "http_parser.h"
+
 #define PORT 8080
 #define MAX_EVENTS 64 // Max events to handle in a single epoll_wait call
-#define BUFFER_SIZE 1024 // Size of buffer for incoming client data
+#define REQUEST_BUFF_SIZE 4096 // Size of buffer for incoming HTTP request
+
+typedef struct conn_data_t {
+    int socket_fd;
+    char ip_addr[INET_ADDRSTRLEN];
+    char request_buff[REQUEST_BUFF_SIZE];
+    size_t request_buff_len;
+} conn_data_t;
 
 volatile sig_atomic_t running = 1;
 void sigint_handler(int sig) {
@@ -23,20 +35,21 @@ void sigint_handler(int sig) {
 bool set_socket_nonblocking(int socket_fd) {
     int flags = fcntl(socket_fd, F_GETFL, 0);
     if (flags == -1) {
-        perror("fcntl() F_GETFL");
+        perror("[ERROR] fcntl() F_GETFL");
         return false;
     }
     if (fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        perror("fcntl() F_SETFL");
+        perror("[ERROR] fcntl() F_SETFL");
         return false;
     }
     return true;
 }
 
-bool register_socket_with_epoll(int epoll_fd, int socket_fd) {
+bool register_socket_with_epoll(int epoll_fd, int socket_fd, void* data) {
     struct epoll_event event;
     event.events = EPOLLIN | EPOLLET; // Watch for incoming data (EPOLLIN) in Edge-Triggered mode (EPOLLET)
-    event.data.fd = socket_fd;
+    if (data) event.data.ptr = data;
+    else event.data.fd = socket_fd;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, socket_fd, &event) < 0) {
         perror("[ERROR] epoll_ctl() add listen_socket");
         return false;
@@ -48,6 +61,12 @@ int create_listening_socket(int epoll_fd) {
     int listen_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_socket_fd < 0) {
         perror("[ERROR] socket()");
+        return -1;
+    }
+
+    int optval = 1;
+    if (setsockopt(listen_socket_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("[ERROR] setsockopt()");
         return -1;
     }
 
@@ -68,7 +87,7 @@ int create_listening_socket(int epoll_fd) {
         return -1;
     }
 
-    if (!register_socket_with_epoll(epoll_fd, listen_socket_fd)) {
+    if (!register_socket_with_epoll(epoll_fd, listen_socket_fd, NULL)) {
         fprintf(stderr, "[ERROR] Failed to register listening socket with epoll");
         close(listen_socket_fd);
         return -1;
@@ -103,37 +122,89 @@ void handle_new_conn_event(int epoll_fd, int listen_socket_fd) {
             continue;
         }
 
-        if (!register_socket_with_epoll(epoll_fd, conn_socket_fd)) {
-            fprintf(stderr, "[ERROR] Failed to register connection socket with epoll");
+        conn_data_t* conn_data = malloc(sizeof(conn_data_t));
+        if (!conn_data) {
+            fprintf(stderr, "[ERROR] Failed to allocate memory for new client connection data");
             close(conn_socket_fd);
             continue;
         }
+        conn_data->socket_fd = conn_socket_fd;
+        conn_data->request_buff_len = 0;
+        inet_ntop(AF_INET, &client_addr.sin_addr, conn_data->ip_addr, sizeof(conn_data->ip_addr));
 
-        char ip_addr_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr.sin_addr, ip_addr_str, sizeof(ip_addr_str));
-        printf("[INFO] Accepted connection from %s on fd %d\n", ip_addr_str, conn_socket_fd);
+        if (!register_socket_with_epoll(epoll_fd, conn_socket_fd, conn_data)) {
+            fprintf(stderr, "[ERROR] Failed to register connection socket with epoll");
+            close(conn_socket_fd);
+            free(conn_data);
+            continue;
+        }
+
+        printf("[INFO] Accepted connection from %s (fd %d)\n", conn_data->ip_addr, conn_socket_fd);
     }
 }
 
-void handle_data_read_event(int conn_socket_fd) {
-    char buffer[BUFFER_SIZE];
+
+void handle_client_event(conn_data_t* conn_data) {
     while (true) {
-        ssize_t n_bytes = read(conn_socket_fd, buffer, sizeof(buffer));
-        if (n_bytes < 0) {
+        char* buff_addr = conn_data->request_buff + conn_data->request_buff_len;
+        size_t n_bytes_to_read = REQUEST_BUFF_SIZE - conn_data->request_buff_len - 1;
+        ssize_t n_bytes_read = read(conn_data->socket_fd, buff_addr, n_bytes_to_read);
+
+        if (n_bytes_read < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break; // All available data read
             perror("[ERROR] read()");
-            close(conn_socket_fd);
             break;
-        } else if (n_bytes == 0) {
-            printf("[INFO] Client on fd %d disconnected.\n", conn_socket_fd);
-            close(conn_socket_fd);
+        }
+
+        if (n_bytes_read == 0) {
+            printf("[INFO] Client %s on fd %d disconnected.\n", conn_data->ip_addr, conn_data->socket_fd);
             break;
-        } else {
-            write(conn_socket_fd, buffer, n_bytes);
+        }
+
+        conn_data->request_buff_len += n_bytes_read;
+        if (conn_data->request_buff_len >= REQUEST_BUFF_SIZE - 1) {
+            fprintf(stderr, "[ERROR] Request too large from fd %d. Closing connection.\n", conn_data->socket_fd);
+            break;
+        }
+
+        conn_data->request_buff[conn_data->request_buff_len] = '\0';
+        printf("[INFO] Data received from %s (fd %d):\n%s\n", conn_data->ip_addr, conn_data->socket_fd, conn_data->request_buff);
+
+        /* Check if we have received the end of the HTTP headers */
+        char* headers_end = strstr(conn_data->request_buff, "\r\n\r\n");
+        if (headers_end) {
+            char* request_line_end = strstr(conn_data->request_buff, "\r\n");
+            char* headers_start = request_line_end + 2;
+            *request_line_end = '\0';
+            *headers_end = '\0';
+
+            http_parse_err_t parse_err;
+            http_headers_t* headers = parse_http_headers(headers_start, &parse_err);
+            char* response;
+            switch (parse_err) {
+                case HTTP_PARSE_OK: {
+                    response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                    break;
+                }
+                case HTTP_PARSE_ERR_MALFORMED_HEADER:
+                case HTTP_PARSE_ERR_EMPTY_HEADER_NAME:
+                    response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                    break;
+                case HTTP_PARSE_ERR_MALLOC:
+                    response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+                    break;
+            }
+
+            memset(conn_data->request_buff, 0, sizeof(conn_data->request_buff));
+            conn_data->request_buff_len = 0;
+            write(conn_data->socket_fd, response, strlen(response));
         }
     }
-}
 
+    printf("[INFO] Closing connection with %s (fd %d)\n", conn_data->ip_addr, conn_data->socket_fd);
+    close(conn_data->socket_fd);
+    free(conn_data);
+}
 
 int main(void) {
     /* Register SIGINT handler */
@@ -171,10 +242,11 @@ int main(void) {
         }
 
         for (int i = 0; i < n_events; i++) {
-            if (events[i].data.fd == listen_socket_fd) {
+            epoll_data_t event_data = events[i].data;
+            if (event_data.fd == listen_socket_fd) {
                 handle_new_conn_event(epoll_fd, listen_socket_fd);
             } else {
-                handle_data_read_event(events[i].data.fd);
+                handle_client_event(event_data.ptr);
             }
         }
     }
