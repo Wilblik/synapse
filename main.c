@@ -168,32 +168,31 @@ void handle_client_event(conn_data_t* conn_data) {
         }
 
         conn_data->request_buff[conn_data->request_buff_len] = '\0';
-        printf("[INFO] Data received from %s (fd %d):\n%s\n", conn_data->ip_addr, conn_data->socket_fd, conn_data->request_buff);
 
         /* Check if we have received the end of the HTTP headers */
         char* headers_end = strstr(conn_data->request_buff, "\r\n\r\n");
         if (headers_end) {
-            char* request_line_end = strstr(conn_data->request_buff, "\r\n");
-            char* headers_start = request_line_end + 2;
-            *request_line_end = '\0';
-            *headers_end = '\0';
-
-            http_parse_err_t parse_err;
-            http_headers_t* headers = parse_http_headers(headers_start, &parse_err);
+            http_request_t request;
+            http_parse_err_t parse_err = http_parse_request(conn_data->request_buff, &request);
             char* response;
             switch (parse_err) {
                 case HTTP_PARSE_OK: {
+                    printf("[INFO] Request received from %s (fd %d):\n", conn_data->ip_addr, conn_data->socket_fd);
+                    http_print_request(&request);
                     response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
                     break;
                 }
+                case HTTP_PARSE_ERR_MALFORMED_REQUEST:
                 case HTTP_PARSE_ERR_MALFORMED_HEADER:
                 case HTTP_PARSE_ERR_EMPTY_HEADER_NAME:
                     response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
                     break;
                 case HTTP_PARSE_ERR_MALLOC:
+                case HTTP_PARSE_ERR_WRONG_USAGE:
                     response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
                     break;
             }
+            http_free_request(&request);
 
             memset(conn_data->request_buff, 0, sizeof(conn_data->request_buff));
             conn_data->request_buff_len = 0;

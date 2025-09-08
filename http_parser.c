@@ -8,36 +8,81 @@
 
 #define INITIAL_HEADERS_CAPACITY 8
 
-static void trim_whitespace(char** str, size_t* len) {
-    if (!str || !*str || !len || *len == 0) return;
-    while (*len > 0 && isspace(**str)) { (*str)++; (*len)--; }
-    while (*len > 0 && isspace((*str)[*len - 1])) { (*len)--; }
-    (*str)[*len] = '\0';
+static void trim_whitespace(char** str, size_t* len);
+static void free_headers(http_headers_t* http_headers);
+static http_parse_err_t parse_headers(char* headers_str, http_headers_t** headers);
+
+http_parse_err_t http_parse_request(char* request_str, http_request_t* request) {
+    if (!request) return HTTP_PARSE_ERR_WRONG_USAGE;
+
+    char* request_line_start = request_str;
+    char* request_line_end = strstr(request_str, "\r\n");
+    if (!request_line_end) return HTTP_PARSE_ERR_MALFORMED_REQUEST;
+    *request_line_end = '\0';
+
+    char* first_space = strchr(request_line_start, ' ');
+    if (!first_space) return HTTP_PARSE_ERR_MALFORMED_REQUEST;
+    *first_space = '\0';
+
+    char* second_space = strchr(first_space + 1, ' ');
+    if (!second_space) return HTTP_PARSE_ERR_MALFORMED_REQUEST;
+    *second_space = '\0';
+
+    request->method = request_line_start;
+    request->uri = first_space + 1;
+    request->version = second_space + 1;
+
+    char* headers_start = request_line_end + 2;
+    http_parse_err_t headers_parsing_result = parse_headers(headers_start, &request->headers);
+    return headers_parsing_result;
 }
 
-static void set_err(http_parse_err_t* err, http_parse_err_t value) {
-    if (err) *err = value;
+/*We only need to free the array and the main struct.
+    The char* pointers for type/value point into the original buffer,
+    which is managed by the caller.
+*/
+void http_free_request(http_request_t *http_request) {
+    free_headers(http_request->headers);
+    http_request->headers = NULL;
+    http_request->method = NULL;
+    http_request->uri = NULL;
+    http_request->version = NULL;
 }
 
-http_headers_t* parse_http_headers(char* headers_str, http_parse_err_t* err_code) {
-    set_err(err_code, HTTP_PARSE_OK);
-    if (!headers_str) return NULL;
+const char* http_get_header_value(const http_headers_t* http_headers, const char* type) {
+    if (!http_headers || !type) return NULL;
+
+    for (size_t i = 0; i < http_headers->len; ++i) {
+        /* Use strncasecmp for case-insensitive comparison, which is required by HTTP spec. */
+        bool prefix_found = strncasecmp(http_headers->data[i].type, type, http_headers->data[i].type_len) == 0;
+        bool strs_are_same_len = type[http_headers->data[i].type_len] == '\0';
+        if (prefix_found && strs_are_same_len) {
+            return http_headers->data[i].value;
+        }
+    }
+
+    return NULL;
+}
+
+void http_print_request(http_request_t* request) {
+    printf("%s %s %s\n", request->method, request->uri, request->version);
+    for (size_t i = 0; i < request->headers->len; ++i) {
+        printf("%s:%s\n", request->headers->data[i].type, request->headers->data[i].value);
+    }
+}
+
+static http_parse_err_t parse_headers(char* headers_str, http_headers_t** headers_out) {
+    if (!headers_str) return HTTP_PARSE_ERR_WRONG_USAGE;
 
     http_headers_t* headers = malloc(sizeof(http_headers_t));
-    if (!headers) {
-        perror("[ERROR] malloc() for http_headers_t");
-        set_err(err_code, HTTP_PARSE_ERR_MALLOC);
-        return NULL;
-    }
+    if (!headers) return HTTP_PARSE_ERR_MALLOC;
 
     headers->len = 0;
     headers->capacity = INITIAL_HEADERS_CAPACITY;
     headers->data = malloc(sizeof(http_header_t) * headers->capacity);
     if (!headers->data) {
-        perror("[ERROR] malloc() for headers array");
-        set_err(err_code, HTTP_PARSE_ERR_MALLOC);
         free(headers);
-        return NULL;
+        return HTTP_PARSE_ERR_MALLOC;
     }
 
     char* curr_line = headers_str;
@@ -48,10 +93,8 @@ http_headers_t* parse_http_headers(char* headers_str, http_parse_err_t* err_code
 
         char* colon = strchr(curr_line, ':');
         if (!colon) {
-            fprintf(stderr, "[ERROR] Malformed header line (no colon): \"%s\"\n", curr_line);
-            set_err(err_code, HTTP_PARSE_ERR_MALFORMED_HEADER);
-            free_http_headers(headers);
-            return NULL;
+            free_headers(headers);
+            return HTTP_PARSE_ERR_MALFORMED_HEADER;
         }
 
         http_header_t new_header = {
@@ -68,10 +111,8 @@ http_headers_t* parse_http_headers(char* headers_str, http_parse_err_t* err_code
             size_t new_capacity = headers->capacity * 2;
             http_header_t* new_headers_ptr = realloc(headers->data, sizeof(http_header_t) * new_capacity);
             if (!new_headers_ptr) {
-                perror("[ERROR] realloc() for headers array");
-                set_err(err_code, HTTP_PARSE_ERR_MALLOC);
-                free_http_headers(headers);
-                return NULL;
+                free_headers(headers);
+                return HTTP_PARSE_ERR_MALLOC;
             }
             headers->data = new_headers_ptr;
             headers->capacity = new_capacity;
@@ -82,30 +123,19 @@ http_headers_t* parse_http_headers(char* headers_str, http_parse_err_t* err_code
         curr_line = line_end + 2;
     }
 
-    return headers;
+    *headers_out = headers;
+    return HTTP_PARSE_OK;
 }
 
-/*We only need to free the array and the main struct.
-    The char* pointers for type/value point into the original buffer,
-    which is managed by the caller.
-*/
-void free_http_headers(http_headers_t* http_headers) {
+static void trim_whitespace(char** str, size_t* len) {
+    if (!str || !*str || !len || *len == 0) return;
+    while (*len > 0 && isspace(**str)) { (*str)++; (*len)--; }
+    while (*len > 0 && isspace((*str)[*len - 1])) { (*len)--; }
+    (*str)[*len] = '\0';
+}
+
+static void free_headers(http_headers_t* http_headers) {
     if (!http_headers) return;
     if (http_headers->data) free(http_headers->data);
     free(http_headers);
-}
-
-const char* get_header_value(const http_headers_t* http_headers, const char* type) {
-    if (!http_headers || !type) return NULL;
-
-    for (size_t i = 0; i < http_headers->len; ++i) {
-        /* Use strncasecmp for case-insensitive comparison, which is required by HTTP spec. */
-        bool prefix_found = strncasecmp(http_headers->data[i].type, type, http_headers->data[i].type_len) == 0;
-        bool strs_are_same_len = type[http_headers->data[i].type_len] == '\0';
-        if (prefix_found && strs_are_same_len) {
-            return http_headers->data[i].value;
-        }
-    }
-
-    return NULL;
 }
