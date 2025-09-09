@@ -1,8 +1,8 @@
-#include <asm-generic/socket.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/epoll.h>
+#include <asm-generic/socket.h>
 
 #include "http_parser.h"
 
@@ -144,6 +145,8 @@ void handle_new_conn_event(int epoll_fd, int listen_socket_fd) {
 }
 
 
+static void close_conn(conn_data_t* conn_data);
+
 void handle_client_event(conn_data_t* conn_data) {
     while (true) {
         char* buff_addr = conn_data->request_buff + conn_data->request_buff_len;
@@ -151,55 +154,75 @@ void handle_client_event(conn_data_t* conn_data) {
         ssize_t n_bytes_read = read(conn_data->socket_fd, buff_addr, n_bytes_to_read);
 
         if (n_bytes_read < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break; // All available data read
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return; // All available data read
             perror("[ERROR] read()");
-            break;
+            close_conn(conn_data);
+            return;
         }
 
         if (n_bytes_read == 0) {
-            printf("[INFO] Client %s on fd %d disconnected.\n", conn_data->ip_addr, conn_data->socket_fd);
-            break;
+            printf("[INFO] Client %s on fd %d disconnected\n", conn_data->ip_addr, conn_data->socket_fd);
+            close_conn(conn_data);
+            return;
         }
 
         conn_data->request_buff_len += n_bytes_read;
         if (conn_data->request_buff_len >= REQUEST_BUFF_SIZE - 1) {
-            fprintf(stderr, "[ERROR] Request too large from fd %d. Closing connection.\n", conn_data->socket_fd);
-            break;
+            fprintf(stderr, "[ERROR] Request too large from fd %d\n", conn_data->socket_fd);
+            close_conn(conn_data);
+            return;
         }
-
-        conn_data->request_buff[conn_data->request_buff_len] = '\0';
 
         /* Check if we have received the end of the HTTP headers */
+        conn_data->request_buff[conn_data->request_buff_len] = '\0';
         char* headers_end = strstr(conn_data->request_buff, "\r\n\r\n");
-        if (headers_end) {
-            http_request_t request;
-            http_parse_err_t parse_err = http_parse_request(conn_data->request_buff, &request);
-            char* response;
-            switch (parse_err) {
-                case HTTP_PARSE_OK: {
-                    printf("[INFO] Request received from %s (fd %d):\n", conn_data->ip_addr, conn_data->socket_fd);
-                    http_print_request(&request);
-                    response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-                    break;
-                }
-                case HTTP_PARSE_ERR_MALFORMED_REQUEST:
-                case HTTP_PARSE_ERR_MALFORMED_HEADER:
-                case HTTP_PARSE_ERR_EMPTY_HEADER_NAME:
-                    response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
-                    break;
-                case HTTP_PARSE_ERR_MALLOC:
-                case HTTP_PARSE_ERR_WRONG_USAGE:
-                    response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
-                    break;
-            }
-            http_free_request(&request);
+        if (!headers_end) continue;
 
-            memset(conn_data->request_buff, 0, sizeof(conn_data->request_buff));
-            conn_data->request_buff_len = 0;
-            write(conn_data->socket_fd, response, strlen(response));
+        printf("[INFO] Request received from %s (fd %d):\n", conn_data->ip_addr, conn_data->socket_fd);
+        printf("%s\n", conn_data->request_buff);
+        http_request_t request = {0};
+        http_parse_err_t parse_err = http_parse_request(conn_data->request_buff, &request);
+
+        switch (parse_err) {
+            case HTTP_PARSE_OK: {
+                char* response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                write(conn_data->socket_fd, response, strlen(response));
+
+                const char* conn_header = http_get_header_value(request.headers, "Connection");
+                bool keep_alive = !(conn_header && strcasecmp(conn_header, "close") == 0);
+                if (!keep_alive) {
+                    close_conn(conn_data);
+                    http_free_request(&request);
+                    return;
+                }
+
+                size_t data_left = conn_data->request_buff_len - (headers_end + 4 - conn_data->request_buff);
+                if (data_left > 0) {
+                    memmove(conn_data->request_buff, headers_end + 4, data_left);
+                }
+                conn_data->request_buff_len = data_left;
+                break;
+            }
+            case HTTP_PARSE_ERR_BAD_REQUEST: {
+                char* response = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                write(conn_data->socket_fd, response, strlen(response));
+                close_conn(conn_data);
+                http_free_request(&request);
+                return;
+            }
+            case HTTP_PARSE_ERR_PARSER_ERR: {
+                perror("[ERROR] Internal server error!");
+                char* response = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                write(conn_data->socket_fd, response, strlen(response));
+                close_conn(conn_data);
+                http_free_request(&request);
+                return;
+            }
         }
     }
+}
 
+static void close_conn(conn_data_t* conn_data) {
     printf("[INFO] Closing connection with %s (fd %d)\n", conn_data->ip_addr, conn_data->socket_fd);
     close(conn_data->socket_fd);
     free(conn_data);
