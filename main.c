@@ -20,11 +20,24 @@
 #define MAX_EVENTS 64 // Max events to handle in a single epoll_wait call
 #define REQUEST_BUFF_SIZE 4096 // Size of buffer for incoming HTTP request
 
+typedef enum {
+    CONN_STATE_READING_HEADERS,
+    CONN_STATE_READING_BODY,
+    CONN_STATE_HANDLING_REQUEST
+} conn_state_t;
+
 typedef struct conn_data_t {
+    conn_state_t state;
     int socket_fd;
     char ip_addr[INET_ADDRSTRLEN];
+
     char request_buff[REQUEST_BUFF_SIZE];
     size_t request_buff_len;
+    size_t body_expected;
+    size_t body_received;
+
+    char* request_end;
+    http_request_t parsed_request;
 } conn_data_t;
 
 volatile sig_atomic_t running = 1;
@@ -129,6 +142,8 @@ void handle_new_conn_event(int epoll_fd, int listen_socket_fd) {
             close(conn_socket_fd);
             continue;
         }
+
+        memset(conn_data, 0, sizeof(conn_data_t));
         conn_data->socket_fd = conn_socket_fd;
         conn_data->request_buff_len = 0;
         inet_ntop(AF_INET, &client_addr.sin_addr, conn_data->ip_addr, sizeof(conn_data->ip_addr));
@@ -145,81 +160,144 @@ void handle_new_conn_event(int epoll_fd, int listen_socket_fd) {
 }
 
 
+static bool read_data_from_socket(conn_data_t* conn_data, ssize_t* n_bytes_read);
+static bool handle_headers(conn_data_t* conn_data);
+static bool handle_request(conn_data_t* conn_data);
+static void check_if_body_received(conn_data_t* conn_data);
 static void close_conn(conn_data_t* conn_data);
 
 void handle_client_event(conn_data_t* conn_data) {
     while (true) {
-        char* buff_addr = conn_data->request_buff + conn_data->request_buff_len;
-        size_t n_bytes_to_read = REQUEST_BUFF_SIZE - conn_data->request_buff_len - 1;
-        ssize_t n_bytes_read = read(conn_data->socket_fd, buff_addr, n_bytes_to_read);
-
-        if (n_bytes_read < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return; // All available data read
-            perror("[ERROR] read()");
-            close_conn(conn_data);
-            return;
-        }
-
-        if (n_bytes_read == 0) {
-            printf("[INFO] Client %s on fd %d disconnected\n", conn_data->ip_addr, conn_data->socket_fd);
-            close_conn(conn_data);
-            return;
-        }
-
-        conn_data->request_buff_len += n_bytes_read;
-        if (conn_data->request_buff_len >= REQUEST_BUFF_SIZE - 1) {
-            fprintf(stderr, "[ERROR] Request too large from fd %d\n", conn_data->socket_fd);
-            close_conn(conn_data);
-            return;
-        }
-
-        /* Check if we have received the end of the HTTP headers */
-        conn_data->request_buff[conn_data->request_buff_len] = '\0';
-        char* headers_end = strstr(conn_data->request_buff, "\r\n\r\n");
-        if (!headers_end) continue;
-
-        printf("[INFO] Request received from %s (fd %d):\n", conn_data->ip_addr, conn_data->socket_fd);
-        printf("%s\n", conn_data->request_buff);
-        http_request_t request = {0};
-        http_parse_err_t parse_err = http_parse_request(conn_data->request_buff, &request);
-
-        switch (parse_err) {
-            case HTTP_PARSE_OK: {
-                char* response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-                write(conn_data->socket_fd, response, strlen(response));
-
-                const char* conn_header = http_get_header_value(request.headers, "Connection");
-                bool keep_alive = !(conn_header && strcasecmp(conn_header, "close") == 0);
-                if (!keep_alive) {
-                    close_conn(conn_data);
-                    http_free_request(&request);
-                    return;
-                }
-
-                size_t data_left = conn_data->request_buff_len - (headers_end + 4 - conn_data->request_buff);
-                if (data_left > 0) {
-                    memmove(conn_data->request_buff, headers_end + 4, data_left);
-                }
-                conn_data->request_buff_len = data_left;
+        switch(conn_data->state) {
+            case CONN_STATE_READING_HEADERS: {
+                if (!read_data_from_socket(conn_data, NULL)) return;
+                if (!handle_headers(conn_data)) return;
                 break;
             }
-            case HTTP_PARSE_ERR_BAD_REQUEST: {
-                char* response = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-                write(conn_data->socket_fd, response, strlen(response));
-                close_conn(conn_data);
-                http_free_request(&request);
-                return;
+            case CONN_STATE_READING_BODY: {
+                ssize_t n_bytes_read;
+                if (!read_data_from_socket(conn_data, &n_bytes_read)) return;
+                conn_data->body_received += n_bytes_read;
+                check_if_body_received(conn_data);
+                break;
             }
-            case HTTP_PARSE_ERR_PARSER_ERR: {
-                perror("[ERROR] Internal server error!");
-                char* response = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-                write(conn_data->socket_fd, response, strlen(response));
-                close_conn(conn_data);
-                http_free_request(&request);
-                return;
+            case CONN_STATE_HANDLING_REQUEST: {
+                if (!handle_request(conn_data)) return;
+                break;
             }
         }
     }
+}
+
+static bool handle_headers(conn_data_t* conn_data) {
+    char* headers_end = strstr(conn_data->request_buff, "\r\n\r\n");
+    if (!headers_end) return true;
+
+    http_request_t request = {0};
+    http_parse_err_t parse_err = http_parse_request(conn_data->request_buff, &request);
+
+    switch (parse_err) {
+        case HTTP_PARSE_OK: {
+            conn_data->parsed_request = request;
+            const char* content_len = http_get_header_value(request.headers, "Content-Length");
+            if (content_len && (conn_data->body_expected = atol(content_len)) > 0) {
+                size_t headers_len = (headers_end + 4) - conn_data->request_buff;
+                conn_data->body_received = conn_data->request_buff_len - headers_len;
+                conn_data->state = CONN_STATE_READING_BODY;
+                check_if_body_received(conn_data);
+            } else {
+                conn_data->state = CONN_STATE_HANDLING_REQUEST;
+                conn_data->request_end = headers_end + 4;
+            }
+            return true;
+        }
+        case HTTP_PARSE_ERR_BAD_REQUEST: {
+            char* response = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            write(conn_data->socket_fd, response, strlen(response));
+            close_conn(conn_data);
+            http_free_request(&request);
+            return false;
+        }
+        case HTTP_PARSE_ERR_PARSER_ERR: {
+            perror("[ERROR] Internal server error!");
+            char* response = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            write(conn_data->socket_fd, response, strlen(response));
+            close_conn(conn_data);
+            http_free_request(&request);
+            return false;
+        }
+        default:
+            return false; // Unreachable
+    }
+}
+
+static bool handle_request(conn_data_t* conn_data) {
+    printf("[INFO] Request received from %s (fd %d):\n", conn_data->ip_addr, conn_data->socket_fd);
+    http_print_request(&conn_data->parsed_request);
+
+    char* response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    write(conn_data->socket_fd, response, strlen(response));
+
+    const char* conn_header = http_get_header_value(conn_data->parsed_request.headers, "Connection");
+    bool keep_alive = !(conn_header && strcasecmp(conn_header, "close") == 0);
+    if (!keep_alive) {
+        close_conn(conn_data);
+        http_free_request(&conn_data->parsed_request);
+        return false;
+    }
+
+    size_t data_left = conn_data->request_buff_len - (conn_data->request_end - conn_data->request_buff);
+    if (data_left > 0) {
+        memmove(conn_data->request_buff, conn_data->request_end, data_left);
+    }
+    conn_data->request_buff_len = data_left;
+    conn_data->request_end = conn_data->request_buff + conn_data->request_buff_len;
+    conn_data->state = CONN_STATE_READING_HEADERS;
+
+    return handle_headers(conn_data);
+}
+
+static void check_if_body_received(conn_data_t* conn_data) {
+    if (conn_data->body_received >= conn_data->body_expected) {
+        char* buff_end = &conn_data->request_buff[conn_data->request_buff_len];
+        size_t excess_data_len = conn_data->body_received - conn_data->body_expected;
+        conn_data->request_end = buff_end - excess_data_len;
+        conn_data->parsed_request.body = conn_data->request_end - conn_data->body_expected;
+        conn_data->parsed_request.body_len = conn_data->body_expected;
+        conn_data->state = CONN_STATE_HANDLING_REQUEST;
+    }
+}
+
+static bool read_data_from_socket(conn_data_t* conn_data, ssize_t* n_bytes_read_out) {
+    size_t n_bytes_to_read = REQUEST_BUFF_SIZE - conn_data->request_buff_len - 1;
+    if (n_bytes_to_read == 0) {
+        fprintf(stderr, "[ERROR] Request too large from fd %d\n", conn_data->socket_fd);
+        close_conn(conn_data);
+        return false;
+    }
+
+    char* buff_addr = conn_data->request_buff + conn_data->request_buff_len;
+    ssize_t n_bytes_read = read(conn_data->socket_fd, buff_addr, n_bytes_to_read);
+
+    if (n_bytes_read < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return false; // All available data read
+        perror("[ERROR] read()");
+        close_conn(conn_data);
+        return false;
+    }
+
+    if (n_bytes_read == 0) {
+        printf("[INFO] Client %s on fd %d disconnected\n", conn_data->ip_addr, conn_data->socket_fd);
+        close_conn(conn_data);
+        return false;
+    }
+
+    /* Check if we have received the end of the HTTP headers */
+    conn_data->request_buff_len += n_bytes_read;
+    conn_data->request_buff[conn_data->request_buff_len] = '\0';
+    if (n_bytes_read_out) *n_bytes_read_out = n_bytes_read;
+
+    return true;
 }
 
 static void close_conn(conn_data_t* conn_data) {
