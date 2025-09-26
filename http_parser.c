@@ -5,12 +5,13 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <strings.h> // For strncasecmp
+#include <unistd.h>
 
 #define INITIAL_HEADERS_CAPACITY 8
 
 static http_method_t parse_method(char* method);
 static http_parse_err_t parse_headers(char* headers_str, http_headers_t** headers);
-static void trim_whitespace(char** str, size_t* len);
+static void trim_whitespace(char** str);
 static bool is_valid_uri(const char* uri);
 
 http_parse_err_t http_parse_request(char* request_str, http_request_t* request) {
@@ -48,12 +49,15 @@ http_parse_err_t http_parse_request(char* request_str, http_request_t* request) 
     if (http_get_header_value(request->headers, "Host") == NULL)
         return HTTP_PARSE_ERR_BAD_REQUEST;
 
+    request->body_in_file = false;
+    request->body = NULL;
+    request->body_file = NULL;
+
     return HTTP_PARSE_OK;
 }
 
-/*We only need to free the array and the main struct.
-    The char* pointers for type/value point into the original buffer,
-    which is managed by the caller.
+/* We only need to free the array and the main struct.
+   Rest of the pointers point into the data managed by the caller.
 */
 void http_free_request(http_request_t* http_request) {
     if (!http_request->headers) return;
@@ -65,10 +69,7 @@ const char* http_get_header_value(const http_headers_t* http_headers, const char
     if (!http_headers || !type) return NULL;
 
     for (size_t i = 0; i < http_headers->len; ++i) {
-        /* Use strncasecmp for case-insensitive comparison, which is required by HTTP spec. */
-        bool prefix_found = strncasecmp(http_headers->data[i].type, type, http_headers->data[i].type_len) == 0;
-        bool strs_are_same_len = type[http_headers->data[i].type_len] == '\0';
-        if (prefix_found && strs_are_same_len) {
+        if (strcasecmp(http_headers->data[i].type, type) == 0) {
             return http_headers->data[i].value;
         }
     }
@@ -111,14 +112,27 @@ void http_print_request(http_request_t* http_request) {
             printf("METHOD UNPRINTABLE");
             break;
     }
-    printf("%s %s\n", http_request->uri, http_request->version);
+    printf(" %s %s\n", http_request->uri, http_request->version);
 
     http_headers_t* headers = http_request->headers;
     for (size_t i = 0; i < headers->len; ++i) {
         http_header_t header = headers->data[i];
         printf("%s:%s\n", header.type, header.value);
     }
-    printf("\n%.*s\n", (int)http_request->body_len, http_request->body);
+
+    char buffer[1024];
+    if (http_request->body_in_file) {
+        size_t bytes_read;
+        printf("\n");
+        while ((bytes_read = fread(buffer, sizeof(char), 1024, http_request->body_file)) > 0) {
+            printf("%.*s", (int)bytes_read, buffer);
+        }
+        printf("\n");
+    } else if (http_request->body) {
+        printf("\n%s\n", http_request->body);
+    }
+
+    printf("\n");
 }
 
 static http_method_t parse_method(char* method_str) {
@@ -154,16 +168,15 @@ static http_parse_err_t parse_headers(char* headers_str, http_headers_t** header
 
         char* colon = strchr(curr_line, ':');
         if (!colon) return HTTP_PARSE_ERR_BAD_REQUEST;
+        *colon = '\0';
 
         http_header_t new_header = {
             .type = curr_line,
-            .type_len = colon - curr_line,
             .value = colon + 1,
-            .value_len = line_end - (colon + 1)
         };
 
-        trim_whitespace(&new_header.type, &new_header.type_len);
-        trim_whitespace(&new_header.value, &new_header.value_len);
+        trim_whitespace(&new_header.type);
+        trim_whitespace(&new_header.value);
 
         if (headers->len >= headers->capacity) {
             size_t new_capacity = headers->capacity * 2;
@@ -182,11 +195,19 @@ static http_parse_err_t parse_headers(char* headers_str, http_headers_t** header
     return HTTP_PARSE_OK;
 }
 
-static void trim_whitespace(char** str, size_t* len) {
-    if (!str || !*str || !len || *len == 0) return;
-    while (*len > 0 && isspace(**str)) { (*str)++; (*len)--; }
-    while (*len > 0 && isspace((*str)[*len - 1])) { (*len)--; }
-    (*str)[*len] = '\0';
+static void trim_whitespace(char** str) {
+    if (!str || !*str || **str == '\0') return;
+
+    /* Trim start */
+    while (isspace(**str)) (*str)++;
+
+    /* Find end */
+    char* end = *str;
+    while (*end != '\0') end++;
+
+    /* Trim end */
+    while (end > *str && isspace(*(end - 1))) end--;
+    *end = '\0';
 }
 
 static bool is_unreserved(char c) {

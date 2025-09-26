@@ -1,7 +1,9 @@
 #ifndef HTTP_PARSER_H_
 #define HTTP_PARSER_H_
 
+#include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 typedef enum {
     HTTP_METHOD_UNKNOWN,
@@ -18,9 +20,7 @@ typedef enum {
 
 typedef struct http_header_t {
     char* type;
-    size_t type_len;
     char* value;
-    size_t value_len;
 } http_header_t;
 
 typedef struct http_headers_t {
@@ -34,8 +34,11 @@ typedef struct http_request_t {
     char* uri;
     char* version;
     http_headers_t* headers;
-    char* body;
-    size_t body_len;
+    bool body_in_file;
+    union {
+        char* body;
+        FILE* body_file;
+    };
 } http_request_t;
 
 typedef enum {
