@@ -1,3 +1,4 @@
 synapse
 test_chunk
-*.o
+obj/
+bin/
