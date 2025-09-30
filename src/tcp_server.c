@@ -1,7 +1,5 @@
 #include "tcp_server.h"
 
-#include <asm-generic/errno-base.h>
-#include <asm-generic/errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -110,7 +108,6 @@ void tcp_server_run(tcp_server_t* server) {
             perror("[ERROR] epoll_wait()");
             break;
         }
-
         for (int i = 0; i < n_events; i++) {
             if (events[i].data.fd == server->listen_socket_fd) {
                 handle_new_conn_event(server);
@@ -215,10 +212,15 @@ void tcp_server_close_conn(tcp_conn_t* conn) {
     if (conn->out_buff) free(conn->out_buff);
 
     if (conn->server->callbacks.on_close) {
-        conn->server->callbacks.on_close(conn->data, conn->server->context);
+        conn->server->callbacks.on_close(conn, conn->data, conn->server->context);
     }
 
     free(conn);
+}
+
+const char* tcp_server_conn_ip(const tcp_conn_t* conn) {
+    if (!conn) return NULL;
+    return conn->ip_addr;
 }
 
 static int create_listening_socket(int epoll_fd, uint16_t port) {
@@ -279,14 +281,9 @@ static bool set_socket_nonblocking(int socket_fd) {
 }
 
 static bool register_socket_with_epoll(int epoll_fd, int socket_fd, void* data) {
-    /* Watch for incoming data (EPOLLIN) in Edge-Triggered mode (EPOLLET) */
     struct epoll_event event = { .events = EPOLLIN | EPOLLET };
-
-    if (data) {
-        event.data.ptr = data;
-    } else {
-        event.data.fd = socket_fd;
-    }
+    if (data) event.data.ptr = data;
+    else event.data.fd = socket_fd;
 
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, socket_fd, &event) < 0) {
         perror("[ERROR] epoll_ctl(ADD)");
@@ -339,7 +336,7 @@ static void handle_new_conn_event(tcp_server_t* server) {
             conn->data = server->callbacks.on_connect(conn, server->context);
         }
 
-        if (!register_socket_with_epoll(server->epoll_fd, conn->socket_fd, conn->data)) {
+        if (!register_socket_with_epoll(server->epoll_fd, conn->socket_fd, conn)) {
             fprintf(stderr, "[ERROR] Failed to register connection socket with epoll");
             tcp_server_close_conn(conn);
             continue;
@@ -371,6 +368,7 @@ static void handle_read_event(tcp_conn_t* conn) {
         }
 
         if (conn->server->callbacks.on_data) {
+            // TODO We need to know whether connection was closed by consumer or don't let them do that!
             conn->server->callbacks.on_data(conn, conn->data, conn->server->context, buff, n_bytes_read);
         }
     }

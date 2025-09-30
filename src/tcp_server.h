@@ -38,4 +38,7 @@ bool tcp_server_write(tcp_conn_t* conn, const char* data, size_t len);
 /* Closes a client connection */
 void tcp_server_close_conn(tcp_conn_t* conn);
 
+/* Returns the IP address string of the client */
+const char* tcp_server_conn_ip(const tcp_conn_t* conn);
+
 #endif // TCP_SERVER_H_
