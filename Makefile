@@ -22,6 +22,9 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 $(BINDIR) $(OBJDIR):
 	@mkdir -p $@
 
+run: all
+	./$(TARGET)
+
 clean:
 	@rm -rf $(BINDIR) $(OBJDIR)
 
