@@ -2,7 +2,6 @@
 #define HTTP_PARSER_H_
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <stdbool.h>
 
 typedef enum {

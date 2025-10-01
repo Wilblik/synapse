@@ -1,11 +1,8 @@
 #include "http_parser.h"
 
+#include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
-#include <stdio.h>
 #include <ctype.h>
-#include <strings.h> // For strncasecmp
-#include <unistd.h>
 
 #define INITIAL_HEADERS_CAPACITY 8
 

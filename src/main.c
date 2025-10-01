@@ -1,9 +1,7 @@
-#include <stdio.h>
-#include <signal.h>
-#include <stdbool.h>
-
 #include "http_parser.h"
 #include "http_server.h"
+
+#include <signal.h>
 
 #define PORT 8080
 #define CONN_TIMEOUT 60

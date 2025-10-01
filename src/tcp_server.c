@@ -1,8 +1,6 @@
 #include "tcp_server.h"
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
@@ -10,9 +8,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <fcntl.h>
-#include <sys/types.h>
 #include <sys/epoll.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
 
 #define MAX_EVENTS 64

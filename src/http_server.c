@@ -1,9 +1,7 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
 #include "http_server.h"
 #include "tcp_server.h"
+
+#include <string.h>
 
 #define HEADERS_BUFF_SIZE 8192
 #define BODY_IN_FILE_THRESHOLD (1024 * 1024)

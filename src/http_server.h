@@ -1,8 +1,9 @@
 #ifndef HTTP_SERVER_H_
 #define HTTP_SERVER_H_
 
-#include <stdint.h>
 #include "http_parser.h"
+
+#include <stdint.h>
 
 typedef struct http_server_t http_server_t;
 typedef struct http_conn_t http_conn_t;

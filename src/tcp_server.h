@@ -1,9 +1,9 @@
 #ifndef TCP_SERVER_H_
 #define TCP_SERVER_H_
 
-#include <stdbool.h>
-#include <stdint.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
 
 /* Represents the server instance */
 typedef struct tcp_server_t tcp_server_t;
