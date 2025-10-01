@@ -5,21 +5,17 @@
 #include "http_parser.h"
 #include "http_server.h"
 
-// TODO Test closing inactive connections
-// TODO Test incomplete writes
-// TODO Test sending large file in HTTP request
-// TODO Test performance
-
 #define PORT 8080
 #define CONN_TIMEOUT 60
 
-// TODO global http server instance
-void sigint_handler(int sig, siginfo_t *info, void *ucontext) {
-    (void)sig;
-    (void)ucontext;
+static volatile http_server_t* g_http_server = NULL;
 
-    http_server_t* http_server = (http_server_t*)info->si_value.sival_ptr;
-    http_server_stop(http_server);
+void sigint_handler(int sig) {
+    (void)sig;
+    printf("\n[INFO] SIGINT received\n");
+    if (g_http_server) {
+        http_server_stop((http_server_t*)g_http_server);
+    }
 }
 
 void on_request(http_conn_t* http_conn, http_request_t* http_req);
@@ -28,10 +24,9 @@ void on_server_error(http_conn_t* http_conn);
 
 int main(void) {
     struct sigaction sa = {0};
-    sa.sa_sigaction = sigint_handler;
-    sa.sa_flags = SA_SIGINFO;
+    sa.sa_handler = sigint_handler;
     if (sigaction(SIGINT, &sa, NULL) < 0) {
-        perror("[ERROR] sigcation()");
+        perror("[ERROR] sigaction()");
         return 1;
     }
 
@@ -43,6 +38,7 @@ int main(void) {
 
     http_server_t* http_server = http_server_create(PORT, http_callbacks, CONN_TIMEOUT);
     if (!http_server) return 1;
+    g_http_server = http_server;
 
     http_server_run(http_server);
     http_server_destroy(http_server);

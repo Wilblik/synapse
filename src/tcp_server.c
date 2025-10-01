@@ -25,6 +25,7 @@ struct tcp_conn_t {
     int socket_fd;
     char ip_addr[INET_ADDRSTRLEN];
     void* data; /* Pointer to user defined data (e.g. http_conn_data_t) */
+    bool is_closed;
 
     time_t last_activity;
     struct tcp_conn_t* next;
@@ -116,6 +117,7 @@ void tcp_server_run(tcp_server_t* server) {
             tcp_conn_t* conn = events[i].data.ptr;
             if (events[i].events & EPOLLIN) handle_read_event(conn);
             if (events[i].events & EPOLLOUT) handle_write_event(conn);
+            if (conn->is_closed) free(conn);
         }
 
         if (server->conn_timeout > 0) {
@@ -134,7 +136,7 @@ void tcp_server_stop(tcp_server_t* server) {
 void tcp_server_destroy(tcp_server_t* server) {
     if (!server || server->running) return;
 
-    printf("[INFO] Destroying server. Closing all active connections\n");
+    printf("[INFO] Destroying server...\n");
 
     tcp_conn_t* conn = server->conn_list_head;
     while (conn != NULL) {
@@ -161,7 +163,7 @@ bool tcp_server_write(tcp_conn_t* conn, const char* data, size_t len) {
             n_bytes_written = 0;
         }
 
-        if ((size_t)n_bytes_written == len){
+        if ((size_t)n_bytes_written == len) {
             move_conn_to_tail(conn);
             return true;
         }
@@ -194,7 +196,7 @@ bool tcp_server_write(tcp_conn_t* conn, const char* data, size_t len) {
 }
 
 void tcp_server_close_conn(tcp_conn_t* conn) {
-    if (!conn) return;
+    if (!conn || conn->is_closed) return;
 
     printf("[INFO] Closing connection with %s (fd %d)\n", conn->ip_addr, conn->socket_fd);
     if (epoll_ctl(conn->server->epoll_fd, EPOLL_CTL_DEL, conn->socket_fd, NULL) < 0) {
@@ -202,6 +204,7 @@ void tcp_server_close_conn(tcp_conn_t* conn) {
     }
 
     close(conn->socket_fd);
+    conn->is_closed = true;
 
     if (conn->prev) conn->prev->next = conn->next;
     else conn->server->conn_list_head = conn->next;
@@ -214,8 +217,6 @@ void tcp_server_close_conn(tcp_conn_t* conn) {
     if (conn->server->callbacks.on_close) {
         conn->server->callbacks.on_close(conn, conn->data, conn->server->context);
     }
-
-    free(conn);
 }
 
 const char* tcp_server_conn_ip(const tcp_conn_t* conn) {
@@ -253,7 +254,7 @@ static int create_listening_socket(int epoll_fd, uint16_t port) {
     }
 
     if (!register_socket_with_epoll(epoll_fd, listen_socket_fd, NULL)) {
-        fprintf(stderr, "[ERROR] Failed to register listening socket with epoll");
+        fprintf(stderr, "[ERROR] Failed to register listening socket with epoll\n");
         close(listen_socket_fd);
         return -1;
     }
@@ -313,7 +314,7 @@ static void handle_new_conn_event(tcp_server_t* server) {
 
         tcp_conn_t* conn = calloc(1, sizeof(tcp_conn_t));
         if (!conn) {
-            fprintf(stderr, "[ERROR] Failed to allocate memory for new client connection data");
+            fprintf(stderr, "[ERROR] Failed to allocate memory for new client connection data\n");
             close(conn_socket_fd);
             continue;
         }
@@ -337,7 +338,7 @@ static void handle_new_conn_event(tcp_server_t* server) {
         }
 
         if (!register_socket_with_epoll(server->epoll_fd, conn->socket_fd, conn)) {
-            fprintf(stderr, "[ERROR] Failed to register connection socket with epoll");
+            fprintf(stderr, "[ERROR] Failed to register connection socket with epoll\n");
             tcp_server_close_conn(conn);
             continue;
         }
@@ -350,7 +351,7 @@ static void handle_read_event(tcp_conn_t* conn) {
     move_conn_to_tail(conn);
 
     char buff[READ_BUFFER_SIZE];
-    while (true) {
+    while (!conn->is_closed) {
         ssize_t n_bytes_read = read(conn->socket_fd, buff, sizeof(buff));
 
         if (n_bytes_read < 0) {
@@ -368,7 +369,6 @@ static void handle_read_event(tcp_conn_t* conn) {
         }
 
         if (conn->server->callbacks.on_data) {
-            // TODO We need to know whether connection was closed by consumer or don't let them do that!
             conn->server->callbacks.on_data(conn, conn->data, conn->server->context, buff, n_bytes_read);
         }
     }
@@ -389,6 +389,9 @@ static void move_conn_to_tail(tcp_conn_t* conn) {
 
 static void handle_write_event(tcp_conn_t* conn) {
     assert(conn->out_buff_len != 0);
+    assert(conn->out_buff_len > conn->out_buff_sent);
+
+    if (conn->is_closed) return;
 
     size_t to_send = conn->out_buff_len - conn->out_buff_sent;
     ssize_t n_bytes_written = write(conn->socket_fd, conn->out_buff + conn->out_buff_sent, to_send);
@@ -433,7 +436,7 @@ static void close_inactive_connections(tcp_server_t* server) {
         if ((now - conn->last_activity) < server->conn_timeout) {
             break;
         }
-        printf("[INFO] Closing inactive connection from %s (fd %d)\n", conn->ip_addr, conn->socket_fd);
+        printf("[INFO] Closing inactive connection\n");
         tcp_conn_t* to_close = conn;
         conn = conn->next;
         tcp_server_close_conn(to_close);

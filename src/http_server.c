@@ -63,7 +63,7 @@ http_server_t* http_server_create(uint16_t port, http_server_callbacks_t callbac
 
     http_server->tcp_server = tcp_server_create(port, tcp_callbacks, conn_timeout, http_server);
     if (!http_server->tcp_server) {
-        fprintf(stderr, "[ERROR] Failed to create tcp server");
+        fprintf(stderr, "[ERROR] Failed to create tcp server\n");
         free(http_server);
         return NULL;
     }
@@ -144,7 +144,7 @@ static void http_on_data(tcp_conn_t* tcp_conn, void* conn_data, void* context, c
                 size_t to_write = data_left_to_read > body_remaining ? body_remaining : data_left_to_read;
 
                 if (http_conn->body_file) {
-                    size_t written = fwrite(http_conn->body_buff, 1, to_write, http_conn->body_file);
+                    size_t written = fwrite(input_buff_pos, 1, to_write, http_conn->body_file);
                     if (written != to_write) {
                         fprintf(stderr, "[ERROR] Failed to write body chunk to temp file.\n");
                         internal_server_error(conn_data);
