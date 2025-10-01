@@ -30,4 +30,4 @@ clean:
 
 -include $(DEPS)
 
-.PHONY: all clean
+.PHONY: all run clean
