@@ -158,7 +158,10 @@ static http_parse_err_t parse_headers(char* headers_str, http_headers_t** header
     headers->len = 0;
     headers->capacity = INITIAL_HEADERS_CAPACITY;
     headers->data = malloc(sizeof(http_header_t) * headers->capacity);
-    if (!headers->data) return HTTP_PARSE_ERR_PARSER_ERR;
+    if (!headers->data) {
+        free(headers);
+        return HTTP_PARSE_ERR_PARSER_ERR;
+    }
 
     char* curr_line = headers_str;
     char* line_end;
@@ -167,7 +170,11 @@ static http_parse_err_t parse_headers(char* headers_str, http_headers_t** header
         *line_end = '\0';
 
         char* colon = strchr(curr_line, ':');
-        if (!colon) return HTTP_PARSE_ERR_BAD_REQUEST;
+        if (!colon) {
+            free(headers->data);
+            free(headers);
+            return HTTP_PARSE_ERR_BAD_REQUEST;
+        }
         *colon = '\0';
 
         http_header_t new_header = {
@@ -181,7 +188,11 @@ static http_parse_err_t parse_headers(char* headers_str, http_headers_t** header
         if (headers->len >= headers->capacity) {
             size_t new_capacity = headers->capacity * 2;
             http_header_t* new_headers_ptr = realloc(headers->data, sizeof(http_header_t) * new_capacity);
-            if (!new_headers_ptr) return HTTP_PARSE_ERR_PARSER_ERR;
+            if (!new_headers_ptr) {
+                free(headers->data);
+                free(headers);
+                return HTTP_PARSE_ERR_PARSER_ERR;
+            }
             headers->data = new_headers_ptr;
             headers->capacity = new_capacity;
         }
