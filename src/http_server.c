@@ -1,3 +1,11 @@
+/**
+ * @file http_server.c
+ * @brief Implements an asynchronous HTTP server on top of a TCP server.
+ *
+ * This file contains the logic for managing HTTP connections, parsing incoming
+ * data streams, handling request bodies, and dispatching requests to user-defined callbacks.
+ */
+
 #include "http_server.h"
 #include "tcp_server.h"
 
@@ -6,11 +14,17 @@
 #define HEADERS_BUFF_SIZE 8192
 #define BODY_IN_FILE_THRESHOLD (1024 * 1024)
 
+/**
+ * @brief Enumeration of states for an HTTP connection.
+ */
 typedef enum {
     CONN_STATE_READING_HEADERS,
     CONN_STATE_READING_BODY
 } http_conn_state_t;
 
+/**
+ * @brief Represents a single HTTP client connection.
+ */
 struct http_conn_t {
     tcp_conn_t* tcp_conn;
     http_server_t* http_server;
@@ -28,6 +42,9 @@ struct http_conn_t {
     http_request_t parsed_request;
 };
 
+/**
+ * @brief Represents the HTTP server instance.
+ */
 struct http_server_t {
     tcp_server_t* tcp_server;
     http_server_callbacks_t callbacks;
@@ -95,6 +112,13 @@ void http_server_close_conn(http_conn_t* http_conn) {
     tcp_server_close_conn(http_conn->tcp_conn);
 }
 
+/**
+ * @brief Callback for when a new TCP connection is established.
+ * Allocates and initializes an http_conn_t structure.
+ * @param tcp_conn The underlying TCP connection object.
+ * @param context A pointer to the http_server_t instance.
+ * @return A pointer to the newly created http_conn_t structure.
+ */
 static void* http_on_connect(tcp_conn_t* tcp_conn, void* context) {
     http_conn_t* http_conn = calloc(1, sizeof(http_conn_t));
     if (!http_conn) {
@@ -107,6 +131,15 @@ static void* http_on_connect(tcp_conn_t* tcp_conn, void* context) {
     return http_conn;
 }
 
+/**
+ * @brief Callback for when data is received on a TCP connection.
+ * Processes the incoming data stream, parsing headers and bodies.
+ * @param tcp_conn The TCP connection object.
+ * @param conn_data A pointer to the associated http_conn_t.
+ * @param context A pointer to the http_server_t instance.
+ * @param buffer The buffer containing the received data.
+ * @param n_read The number of bytes received.
+ */
 static void http_on_data(tcp_conn_t* tcp_conn, void* conn_data, void* context, const char* buffer, size_t n_read) {
     (void)tcp_conn;
     (void)context;
@@ -164,6 +197,13 @@ static void http_on_data(tcp_conn_t* tcp_conn, void* conn_data, void* context, c
     }
 }
 
+/**
+ * @brief Callback for when a TCP connection is closed.
+ * Frees resources associated with the http_conn_t structure.
+ * @param tcp_conn The TCP connection object.
+ * @param conn_data A pointer to the associated http_conn_t.
+ * @param context A pointer to the http_server_t instance.
+ */
 static void http_on_close(tcp_conn_t* tcp_conn, void* conn_data, void* context) {
     (void)tcp_conn;
     (void)context;
@@ -178,6 +218,12 @@ static void http_on_close(tcp_conn_t* tcp_conn, void* conn_data, void* context) 
     free(http_conn);
 }
 
+/**
+ * @brief Attempts to parse the headers buffer to see if a full request is present.
+ * If a full request is found, it proceeds to handle it.
+ * @param http_conn The connection object.
+ * @return A boolean indicating if the connection should remain open.
+ */
 static bool try_parse_request(http_conn_t* http_conn) {
     char* headers_end = strstr(http_conn->headers_buff, "\r\n\r\n");
     if (!headers_end) return true;
@@ -207,6 +253,12 @@ static bool try_parse_request(http_conn_t* http_conn) {
     return check_if_body_received(http_conn);
 }
 
+/**
+ * @brief Initializes the necessary structures for reading the request body.
+ * Decides whether to buffer the body in memory or in a temporary file.
+ * @param http_conn The connection object.
+ * @return A boolean indicating if initialization was successful.
+ */
 static bool init_body_reading(http_conn_t* http_conn) {
     http_conn->state = CONN_STATE_READING_BODY;
 
@@ -248,6 +300,12 @@ static bool init_body_reading(http_conn_t* http_conn) {
     return true;
 }
 
+/**
+ * @brief Checks if the entire request body has been received.
+ * If it has, it calls the request handler.
+ * @param http_conn The connection object.
+ * @return A boolean indicating if the connection should remain open.
+ */
 static bool check_if_body_received(http_conn_t* http_conn) {
     if (http_conn->body_received >= http_conn->body_expected) {
         if (http_conn->body_file) {
@@ -260,6 +318,12 @@ static bool check_if_body_received(http_conn_t* http_conn) {
     return true;
 }
 
+/**
+ * @brief Handles a fully parsed HTTP request by invoking the user-provided callback.
+ * Also handles connection persistence (Keep-Alive) and pipelining.
+ * @param http_conn The connection object.
+ * @return A boolean indicating if the connection should remain open for subsequent requests.
+ */
 static bool handle_request(http_conn_t* http_conn) {
     printf("[INFO] Request received from %s\n", tcp_server_conn_ip(http_conn->tcp_conn));
 
@@ -268,7 +332,7 @@ static bool handle_request(http_conn_t* http_conn) {
         /* Save pointer to tcp_conn in case http_conn gets freed after on_request callback */
         tcp_conn_t* tcp_conn = http_conn->tcp_conn;
         http_conn->http_server->callbacks.on_request(http_conn, &http_conn->parsed_request);
-        if (is_conn_closed(tcp_conn)) return false;
+        if (tcp_server_is_conn_closed(tcp_conn)) return false;
     } else {
         const char* res = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n";
         if (!http_server_send_data(http_conn, res, strlen(res))) {
@@ -299,6 +363,10 @@ static bool handle_request(http_conn_t* http_conn) {
     return true;
 }
 
+/**
+ * @brief Resets the state of an http_conn_t to prepare for the next request on the same connection.
+ * @param http_conn The connection object to reset.
+ */
 static void reset_http_conn(http_conn_t* http_conn) {
     http_free_request(&http_conn->parsed_request);
 
@@ -319,6 +387,10 @@ static void reset_http_conn(http_conn_t* http_conn) {
     http_conn->state = CONN_STATE_READING_HEADERS;
 }
 
+/**
+ * @brief Handles a bad request by invoking the user-provided callback or sending a 400 response.
+ * @param http_conn The connection object.
+ */
 static void bad_request(http_conn_t* http_conn) {
     if (http_conn->http_server && http_conn->http_server->callbacks.on_bad_request) {
         http_conn->http_server->callbacks.on_bad_request(http_conn);
@@ -331,6 +403,10 @@ static void bad_request(http_conn_t* http_conn) {
     }
 }
 
+/**
+ * @brief Handles an internal server error by invoking the callback or sending a 500 response.
+ * @param http_conn The connection object.
+ */
 static void internal_server_error(http_conn_t* http_conn) {
     perror("[ERROR] Internal server error");
     if (http_conn->http_server && http_conn->http_server->callbacks.on_server_error) {

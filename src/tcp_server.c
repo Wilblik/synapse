@@ -1,3 +1,12 @@
+/**
+ * @file tcp_server.c
+ * @brief Implements an asynchronous, non-blocking TCP server using epoll.
+ *
+ * This file provides the core functionality for handling multiple client
+ * connections.. It manages listening sockets, accepts new connections,
+ * reads and writes data, and handles connection timeouts.
+ */
+
 #include "tcp_server.h"
 
 #include <stdio.h>
@@ -16,11 +25,14 @@
 #define READ_BUFFER_SIZE 8192
 #define INITIAL_WRITE_BUFFER_CAPACITY 4096
 
+/**
+ * @brief Represents a single client connection.
+ */
 struct tcp_conn_t {
     tcp_server_t* server;
     int socket_fd;
     char ip_addr[INET_ADDRSTRLEN];
-    void* data; /* Pointer to user defined data (e.g. http_conn_data_t) */
+    void* data; /* Pointer to user defined data (e.g. http_conn_t) */
     bool is_closed;
 
     time_t last_activity;
@@ -33,6 +45,9 @@ struct tcp_conn_t {
     size_t out_buff_capacity;
 };
 
+/**
+ * @brief Represents the TCP server instance.
+ */
 struct tcp_server_t {
     int listen_socket_fd;
     int epoll_fd;
@@ -148,7 +163,8 @@ void tcp_server_destroy(tcp_server_t* server) {
 }
 
 bool tcp_server_write(tcp_conn_t* conn, const char* data, size_t len) {
-    if (!conn || !data || len == 0) return false;
+    if (!conn || !data || len == 0 || conn->is_closed) return false;
+
     if (conn->out_buff_len == 0) {
         ssize_t n_bytes_written = write(conn->socket_fd, data, len);
         if (n_bytes_written < 0) {
@@ -174,6 +190,7 @@ bool tcp_server_write(tcp_conn_t* conn, const char* data, size_t len) {
         size_t new_cap = conn->out_buff_capacity > 0
             ? conn->out_buff_capacity * 2
             : INITIAL_WRITE_BUFFER_CAPACITY;
+
         if (new_cap < needed) new_cap = needed;
 
         char* new_buff = realloc(conn->out_buff, new_cap);
@@ -189,6 +206,7 @@ bool tcp_server_write(tcp_conn_t* conn, const char* data, size_t len) {
 
     memcpy(conn->out_buff + conn->out_buff_len, data, len);
     conn->out_buff_len += len;
+
     return mod_epoll_for_writing(conn, true);
 }
 
@@ -221,11 +239,17 @@ const char* tcp_server_conn_ip(const tcp_conn_t* conn) {
     return conn->ip_addr;
 }
 
-bool is_conn_closed(const tcp_conn_t* conn) {
+bool tcp_server_is_conn_closed(const tcp_conn_t* conn) {
     if (!conn) return true;
     return conn->is_closed;
 }
 
+/**
+ * @brief Creates and configures the main listening socket for the server.
+ * @param epoll_fd The epoll file descriptor.
+ * @param port The port to bind to.
+ * @return The file descriptor of the listening socket, or -1 on error.
+ */
 static int create_listening_socket(int epoll_fd, uint16_t port) {
     int listen_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_socket_fd < 0) {
@@ -236,6 +260,7 @@ static int create_listening_socket(int epoll_fd, uint16_t port) {
     int optval = 1;
     if (setsockopt(listen_socket_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
         perror("[ERROR] setsockopt()");
+        close(listen_socket_fd);
         return -1;
     }
 
@@ -252,6 +277,7 @@ static int create_listening_socket(int epoll_fd, uint16_t port) {
 
     if (bind(listen_socket_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("[ERROR] bind()");
+        close(listen_socket_fd);
         return -1;
     }
 
@@ -270,6 +296,11 @@ static int create_listening_socket(int epoll_fd, uint16_t port) {
     return listen_socket_fd;
 }
 
+/**
+ * @brief Sets a socket to non-blocking mode.
+ * @param socket_fd The file descriptor of the socket.
+ * @return True on success, false on failure.
+ */
 static bool set_socket_nonblocking(int socket_fd) {
     int flags = fcntl(socket_fd, F_GETFL, 0);
     if (flags == -1) {
@@ -283,6 +314,13 @@ static bool set_socket_nonblocking(int socket_fd) {
     return true;
 }
 
+/**
+ * @brief Registers a socket file descriptor with the epoll instance.
+ * @param epoll_fd The epoll file descriptor.
+ * @param socket_fd The socket to register.
+ * @param data A pointer to associate with the socket's events.
+ * @return True on success, false on failure.
+ */
 static bool register_socket_with_epoll(int epoll_fd, int socket_fd, void* data) {
     struct epoll_event event = { .events = EPOLLIN | EPOLLET };
     if (data) event.data.ptr = data;
@@ -296,6 +334,10 @@ static bool register_socket_with_epoll(int epoll_fd, int socket_fd, void* data) 
     return true;
 }
 
+/**
+ * @brief Handles new incoming connections on the listening socket.
+ * @param server The server instance.
+ */
 static void handle_new_conn_event(tcp_server_t* server) {
     while (true) {
         struct sockaddr_in client_addr = {0};
@@ -342,6 +384,7 @@ static void handle_new_conn_event(tcp_server_t* server) {
         if (!register_socket_with_epoll(server->epoll_fd, conn->socket_fd, conn)) {
             fprintf(stderr, "[ERROR] Failed to register connection socket with epoll\n");
             tcp_server_close_conn(conn);
+            free(conn);
             continue;
         }
 
@@ -349,6 +392,10 @@ static void handle_new_conn_event(tcp_server_t* server) {
     }
 }
 
+/**
+ * @brief Handles a read event on a client socket.
+ * @param conn The connection that has data to be read.
+ */
 static void handle_read_event(tcp_conn_t* conn) {
     move_conn_to_tail(conn);
 
@@ -376,6 +423,11 @@ static void handle_read_event(tcp_conn_t* conn) {
     }
 }
 
+/**
+ * @brief Moves a connection to the tail of the linked list.
+ * Used for tracking connection activity for timeouts.
+ * @param conn The connection to move.
+ */
 static void move_conn_to_tail(tcp_conn_t* conn) {
     conn->last_activity = time(NULL);
     if (conn->server->conn_list_tail == conn) return;
@@ -388,11 +440,11 @@ static void move_conn_to_tail(tcp_conn_t* conn) {
     conn->server->conn_list_tail = conn;
 }
 
-
+/**
+ * @brief Handles a write event on a client socket, sending buffered data.
+ * @param conn The connection that is ready for writing.
+ */
 static void handle_write_event(tcp_conn_t* conn) {
-    assert(conn->out_buff_len != 0);
-    assert(conn->out_buff_len > conn->out_buff_sent);
-
     if (conn->is_closed) return;
 
     size_t to_send = conn->out_buff_len - conn->out_buff_sent;
@@ -410,12 +462,16 @@ static void handle_write_event(tcp_conn_t* conn) {
     if (conn->out_buff_len == conn->out_buff_sent) {
         conn->out_buff_len = 0;
         conn->out_buff_sent = 0;
-        if (!mod_epoll_for_writing(conn, false)) {
-            tcp_server_close_conn(conn);
-        }
+        mod_epoll_for_writing(conn, false);
     }
 }
 
+/**
+ * @brief Modifies the epoll registration for a connection to enable or disable write notifications.
+ * @param conn The connection to modify.
+ * @param enable_writing True to enable EPOLLOUT, false to disable.
+ * @return True on success, false on failure.
+ */
 static bool mod_epoll_for_writing(tcp_conn_t* conn, bool enable_writing) {
     struct epoll_event event = {
         .data.ptr = conn,
@@ -431,6 +487,10 @@ static bool mod_epoll_for_writing(tcp_conn_t* conn, bool enable_writing) {
     return true;
 }
 
+/**
+ * @brief Iterates through connections and closes any that have been inactive for too long.
+ * @param server The server instance.
+ */
 static void close_inactive_connections(tcp_server_t* server) {
     time_t now = time(NULL);
     tcp_conn_t* conn = server->conn_list_head;

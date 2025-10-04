@@ -53,11 +53,8 @@ http_parse_err_t http_parse_request(char* request_str, http_request_t* request) 
     return HTTP_PARSE_OK;
 }
 
-/* We only need to free the array and the main struct.
-   Rest of the pointers point into the data managed by the caller.
-*/
 void http_free_request(http_request_t* http_request) {
-    if (!http_request->headers) return;
+    if (!http_request || !http_request->headers) return;
     if (http_request->headers->data) free(http_request->headers->data);
     free(http_request->headers);
 }
@@ -132,6 +129,11 @@ void http_print_request(http_request_t* http_request) {
     printf("\n");
 }
 
+/**
+ * @brief Converts an HTTP method string to its corresponding enum value.
+ * @param method_str The string representation of the HTTP method (e.g., "GET").
+ * @return The http_method_t enum value, or HTTP_METHOD_UNKNOWN if not recognized.
+ */
 static http_method_t parse_method(char* method_str) {
     if (strcmp(method_str, "GET")     == 0) return HTTP_METHOD_GET;
     if (strcmp(method_str, "POST")    == 0) return HTTP_METHOD_POST;
@@ -146,6 +148,12 @@ static http_method_t parse_method(char* method_str) {
     return HTTP_METHOD_UNKNOWN;
 }
 
+/**
+ * @brief Parses a block of HTTP headers.
+ * @param headers_str The string containing all headers, with each line ending in "\r\n".
+ * @param headers_out A pointer to receive the newly allocated http_headers_t structure.
+ * @return An http_parse_err_t indicating the outcome of the parsing operation.
+ */
 static http_parse_err_t parse_headers(char* headers_str, http_headers_t** headers_out) {
     if (!headers_str) return HTTP_PARSE_ERR_PARSER_ERR;
 
@@ -203,6 +211,10 @@ static http_parse_err_t parse_headers(char* headers_str, http_headers_t** header
     return HTTP_PARSE_OK;
 }
 
+/**
+ * @brief Removes leading and trailing whitespace from a string in-place.
+ * @param str A pointer to the character pointer to be trimmed.
+ */
 static void trim_whitespace(char** str) {
     if (!str || !*str || **str == '\0') return;
 
@@ -218,10 +230,20 @@ static void trim_whitespace(char** str) {
     *end = '\0';
 }
 
+/**
+ * @brief Checks if a character is an unreserved URI character according to RFC 3986.
+ * @param c The character to check.
+ * @return True if the character is unreserved, false otherwise.
+ */
 static bool is_unreserved(char c) {
     return isalnum(c) || c == '-' || c == '.' || c == '_' || c == '~';
 }
 
+/**
+ * @brief Validates a URI string according to a subset of RFC 3986 rules.
+ * @param uri The URI string to validate.
+ * @return True if the URI is considered valid, false otherwise.
+ */
 static bool is_valid_uri(const char* uri) {
     if (!uri || uri[0] != '/') return false;
 
