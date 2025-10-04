@@ -220,6 +220,11 @@ const char* tcp_server_conn_ip(const tcp_conn_t* conn) {
     return conn->ip_addr;
 }
 
+bool is_conn_closed(const tcp_conn_t* conn) {
+    if (!conn) return true;
+    return conn->is_closed;
+}
+
 static int create_listening_socket(int epoll_fd, uint16_t port) {
     int listen_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_socket_fd < 0) {

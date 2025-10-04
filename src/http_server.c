@@ -85,9 +85,9 @@ void http_server_destroy(http_server_t* http_server) {
     free(http_server);
 }
 
-bool http_server_send_response(http_conn_t* http_conn, const char* response) {
+bool http_server_send_data(http_conn_t* http_conn, const char* response, size_t data_len) {
     if (!http_conn || !response) return false;
-    return tcp_server_write(http_conn->tcp_conn, response, strlen(response));
+    return tcp_server_write(http_conn->tcp_conn, response, data_len);
 }
 
 void http_server_close_conn(http_conn_t* http_conn) {
@@ -120,7 +120,8 @@ static void http_on_data(tcp_conn_t* tcp_conn, void* conn_data, void* context, c
             case CONN_STATE_READING_HEADERS: {
                 size_t space_left = HEADERS_BUFF_SIZE - http_conn->headers_buff_len - 1;
                 if (space_left == 0) {
-                    if (http_server_send_response(http_conn, "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n")) {
+                    const char* res = "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n";
+                    if (http_server_send_data(http_conn, res, strlen(res))) {
                         http_server_close_conn(http_conn);
                     }
                     return;
@@ -265,11 +266,13 @@ static bool handle_request(http_conn_t* http_conn) {
     if (http_conn->http_server && http_conn->http_server->callbacks.on_request) {
         http_conn->http_server->callbacks.on_request(http_conn, &http_conn->parsed_request);
     } else {
-        const char* resp = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n";
-        if (!http_server_send_response(http_conn, resp)) {
+        const char* res = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n";
+        if (!http_server_send_data(http_conn, res, strlen(res))) {
             return false;
         }
     }
+
+    if (is_conn_closed(http_conn->tcp_conn)) return false;
 
     const char* conn_header = http_get_header_value(http_conn->parsed_request.headers, "Connection");
     bool should_close_conn = (conn_header && strcasecmp(conn_header, "close") == 0);
@@ -320,7 +323,7 @@ static void bad_request(http_conn_t* http_conn) {
         http_server_close_conn(http_conn);
     } else {
         const char* res = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
-        if (http_server_send_response(http_conn, res)) {
+        if (http_server_send_data(http_conn, res, strlen(res))) {
             http_server_close_conn(http_conn);
         }
     }
@@ -333,7 +336,7 @@ static void internal_server_error(http_conn_t* http_conn) {
         http_server_close_conn(http_conn);
     } else {
         const char* res = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n";
-        if (http_server_send_response(http_conn, res)) {
+        if (http_server_send_data(http_conn, res, strlen(res))) {
             http_server_close_conn(http_conn);
         }
     }

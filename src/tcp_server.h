@@ -41,4 +41,6 @@ void tcp_server_close_conn(tcp_conn_t* conn);
 /* Returns the IP address string of the client */
 const char* tcp_server_conn_ip(const tcp_conn_t* conn);
 
+bool is_conn_closed(const tcp_conn_t* conn);
+
 #endif // TCP_SERVER_H_

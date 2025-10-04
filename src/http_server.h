@@ -24,7 +24,7 @@ http_server_t* http_server_create(uint16_t port, http_server_callbacks_t callbac
 void http_server_run(http_server_t* http_server);
 void http_server_stop(http_server_t* http_server);
 void http_server_destroy(http_server_t* http_server);
-bool http_server_send_response(http_conn_t* conn, const char* response);
-void http_server_close_conn(http_conn_t* conn);
+bool http_server_send_data(http_conn_t* http_conn, const char* response, size_t data_len);
+void http_server_close_conn(http_conn_t* http_conn);
 
 #endif // HTTP_SERVER_H_

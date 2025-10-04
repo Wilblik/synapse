@@ -1,6 +1,7 @@
 SRCDIR   := src
 OBJDIR   := obj
 BINDIR   := bin
+ARGS ?=
 
 SRCS     := $(wildcard $(SRCDIR)/*.c)
 OBJS     := $(patsubst $(SRCDIR)/%.c, $(OBJDIR)/%.o, $(SRCS))
@@ -23,7 +24,7 @@ $(BINDIR) $(OBJDIR):
 	@mkdir -p $@
 
 run: all
-	./$(TARGET)
+	./$(TARGET) $(ARGS)
 
 clean:
 	@rm -rf $(BINDIR) $(OBJDIR)
