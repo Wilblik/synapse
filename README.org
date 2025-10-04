@@ -1,0 +1,49 @@
+* Synapse
+
+A very simple HTTP server written in C from scratch for learning purposes. It is single threaded and uses non-blocking I/O with epoll.
+
+* Features
+
+- *Static File Serving*: Serves any type of file from the local filesystem.
+- *Directory Serving*: Can display a navigable directory listing in the browser.
+- *Static Website Mode*: Can serve an =index.html= as the root of a directory, disabling the file browser GUI.
+- *Asynchronous*: Uses a non-blocking, event-driven architecture with epoll on Linux.
+- *Modular*: It should be pretty straightforward to use different parts of this project as a base for something different (e.g. =tcp_server.h=, =http_server.h=)
+
+* How to Build
+#+begin_src bash
+make
+#+end_src
+
+* How to Run
+#+begin_src bash
+./bin/synapse [options] <web_root_path>
+#+end_src
+
+or
+
+#+begin_src bash
+make run ARGS="[options] <web_root_path>"
+#+end_src
+
+** Options:
+
+=-p, --port <port>= :: Specify the port to listen on (default: 8080).
+
+=-t, --conn_timeout <seconds>= :: Connection timeout for inactive clients (default: 60).
+
+=-b, --no-browse= :: Disable the directory browser and serve =index.html= instead.
+
+=-h, --help= :: Prints usage message
+
+* Running the Demo Website
+
+#+BEGIN_SRC bash
+./bin/synapse --no-browse ./wwwroot
+#+END_SRC
+
+* Serving project directory
+
+#+BEGIN_SRC bash
+./bin/synapse ./
+#+END_SRC
