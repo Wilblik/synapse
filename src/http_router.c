@@ -1,3 +1,14 @@
+/**
+ * @file http_router.c
+ * @brief Implements the routing logic that maps HTTP requests to filesystem resources.
+ *
+ * This file provides the core request handling callbacks for the HTTP server.
+ * It is responsible for validating incoming requests, resolving the request URI
+ * to a safe path within the web root directory, and serving the corresponding
+ * resource. It can serve static files, generate directory listings if enabled,
+ * or return appropriate error responses (e.g., 404 Not Found, 403 Forbidden).
+ */
+
 #include "http_router.h"
 #include "http_server.h"
 
