@@ -263,16 +263,18 @@ static bool check_if_body_received(http_conn_t* http_conn) {
 static bool handle_request(http_conn_t* http_conn) {
     printf("[INFO] Request received from %s\n", tcp_server_conn_ip(http_conn->tcp_conn));
 
+
     if (http_conn->http_server && http_conn->http_server->callbacks.on_request) {
+        /* Save pointer to tcp_conn in case http_conn gets freed after on_request callback */
+        tcp_conn_t* tcp_conn = http_conn->tcp_conn;
         http_conn->http_server->callbacks.on_request(http_conn, &http_conn->parsed_request);
+        if (is_conn_closed(tcp_conn)) return false;
     } else {
         const char* res = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n";
         if (!http_server_send_data(http_conn, res, strlen(res))) {
             return false;
         }
     }
-
-    if (is_conn_closed(http_conn->tcp_conn)) return false;
 
     const char* conn_header = http_get_header_value(http_conn->parsed_request.headers, "Connection");
     bool should_close_conn = (conn_header && strcasecmp(conn_header, "close") == 0);

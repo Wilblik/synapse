@@ -105,6 +105,7 @@ void tcp_server_run(tcp_server_t* server) {
             perror("[ERROR] epoll_wait()");
             break;
         }
+
         for (int i = 0; i < n_events; i++) {
             if (events[i].data.fd == server->listen_socket_fd) {
                 handle_new_conn_event(server);
